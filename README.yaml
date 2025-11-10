@@ -1,0 +1,241 @@
+# create vpc
+resource "aws_vpc" "net" {
+    cidr_block = "192.168.0.0/16"
+    tags = {
+        Name = "vpc-01"
+    }
+  
+}
+# subnet public
+resource "aws_subnet" "pub" {
+  vpc_id = aws_vpc.net.id 
+  cidr_block = "192.168.0.0/22"
+  availability_zone = "ap-south-1a"
+  map_public_ip_on_launch = true 
+  tags = {
+    Name = "pubic-subnet"
+  }
+}
+
+# igw
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.net.id 
+  tags = {
+    Name = "igw-01"
+  }
+}
+
+# rt
+resource "aws_route_table" "rt-pub" {
+  vpc_id = aws_vpc.net.id 
+  tags = {
+    Name = "RT-Public"
+  }
+
+  route {
+    gateway_id = aws_internet_gateway.igw.id 
+    cidr_block = "0.0.0.0/0"
+  }
+}
+
+#rta
+resource "aws_route_table_association" "rta-pub" {
+  route_table_id = aws_route_table.rt-pub.id 
+  subnet_id = aws_subnet.pub.id 
+}
+
+
+
+# private subnet
+resource "aws_subnet" "pri" {
+    vpc_id  = aws_vpc.net.id 
+    cidr_block = "192.168.4.0/22"
+    availability_zone = "ap-south-1b"
+    map_public_ip_on_launch = false 
+    tags = {
+        Name = "private-subnet"
+    }
+  
+}
+
+# elastic ip
+resource "aws_eip" "static" {
+    domain = "vpc"
+  
+}
+# nat gateway
+resource "aws_nat_gateway" "nat" {
+  subnet_id = aws_subnet.pub.id 
+  allocation_id = aws_eip.static.id 
+  tags = {
+    Name = "nat-01"
+  }
+}
+
+# route table
+resource "aws_route_table" "rt-pri" {
+  vpc_id = aws_vpc.net.id 
+  tags = {
+    Name = "RT-Private"
+  }
+
+  route {
+    nat_gateway_id = aws_nat_gateway.nat.id 
+    cidr_block = "0.0.0.0/0"
+  }
+}
+
+# rta
+resource "aws_route_table_association" "rta-pri" {
+  subnet_id = aws_subnet.pri.id 
+  route_table_id = aws_route_table.rt-pri.id
+}
+
+
+# security group
+
+resource "aws_security_group" "sg" {
+  vpc_id = aws_vpc.net.id 
+  name = "firewall-01"
+
+  ingress {
+    from_port = 22
+    to_port = 22
+    protocol = "TCP"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+    ingress {
+    from_port = 80
+    to_port = 80
+    protocol = "TCP"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port = 0
+    to_port = 0
+    protocol = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+
+resource "aws_instance" "vm-1" {
+  ami = "ami-0305d3d91b9f22e84"
+  instance_type = "t3.micro"
+  key_name = "docker-key"
+  subnet_id = aws_subnet.pub.id 
+  vpc_security_group_ids = [aws_security_group.sg.id]
+  user_data = <<-EOF
+   #!/bin/bash
+   sudo -i
+   yum install httpd -y 
+   systemctl start httpd 
+   systemctl enable httpd
+   echo "welcome to httpd" > /var/www/html/index.html
+  EOF
+  tags = {
+    Name = "Frontend"
+  }
+}
+
+resource "aws_instance" "vm-2" {
+  ami = "ami-0305d3d91b9f22e84"
+  instance_type = "t3.micro"
+  key_name = "docker-key"
+  subnet_id = aws_subnet.pri.id
+  vpc_security_group_ids = [aws_security_group.sg.id]
+
+  tags = {
+    Name = "Backend"
+  }
+}
+
+resource "aws_subnet" "pri-db" {
+  vpc_id                  = aws_vpc.net.id
+  cidr_block              = "192.168.8.0/22"
+  availability_zone       = "ap-south-1c"
+  map_public_ip_on_launch = false
+
+  tags = {
+    Name = "private-subnet-db"
+  }
+  
+}
+resource "aws_route_table_association" "rta-pri-db" {
+  subnet_id      = aws_subnet.pri-db.id
+  route_table_id = aws_route_table.rt-pri.id
+}
+
+
+
+resource "aws_db_subnet_group" "db-subnet-group" {
+  name       = "db-subnet-group"
+  subnet_ids = [
+    aws_subnet.pri.id,
+    aws_subnet.pri-db.id
+  ]
+
+  tags = {
+    Name = "db-subnet-group"
+  }
+}
+
+
+resource "aws_security_group" "db-sg" {
+  name   = "db-security-group"
+  vpc_id = aws_vpc.net.id
+
+  ingress {
+    protocol        = "tcp"
+    from_port       = 3306
+    to_port         = 3306
+    security_groups = [aws_security_group.sg.id]   # Only backend SG can access
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "DB-SG"
+  }
+}
+
+
+resource "aws_db_instance" "rds_db" {
+  identifier              = "private-rds-db"
+  engine                  = "mysql"
+  engine_version          = "8.0"
+  instance_class          = "db.t3.micro"
+  allocated_storage       = 20
+  storage_type            = "gp2"
+
+  username                = "admin"
+  password                = "Pass123$"
+
+  db_subnet_group_name    = aws_db_subnet_group.db-subnet-group.name
+  vpc_security_group_ids   = [aws_security_group.db-sg.id]
+  publicly_accessible     = false
+
+  skip_final_snapshot     = true
+
+  tags = {
+    Name = "RDS-DB"
+  }
+}
+
+resource "aws_instance" "vm-3" {
+  ami = "ami-0305d3d91b9f22e84"
+  instance_type = "t3.micro"
+  key_name = "docker-key"
+  subnet_id = aws_subnet.pri.id
+  vpc_security_group_ids = [aws_security_group.sg.id]
+
+  tags = {
+    Name = "RDS-vm"
+  }
+}
